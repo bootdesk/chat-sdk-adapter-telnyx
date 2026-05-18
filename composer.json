@@ -1,39 +1,40 @@
 {
-    "$schema": "https://getcomposer.org/schema.json",
-    "name": "bootdesk/chat-sdk-adapter-telnyx",
-    "description": "Telnyx adapter for bootdesk/chat-sdk-core (SMS, MMS, RCS)",
-    "type": "library",
-    "license": "MIT",
-    "require": {
-        "php": ">=8.2",
-        "bootdesk/chat-sdk-core": "*",
-        "ext-json": "*",
-        "ext-sodium": "*",
-        "psr/http-client": "^1.0",
-        "psr/http-factory": "^1.0"
+  "$schema": "https://getcomposer.org/schema.json",
+  "name": "bootdesk/chat-sdk-adapter-telnyx",
+  "description": "Telnyx adapter for bootdesk/chat-sdk-core (SMS, MMS, RCS)",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.2",
+    "bootdesk/chat-sdk-core": "^0.2.3",
+    "ext-json": "*",
+    "ext-sodium": "*",
+    "psr/http-client": "^1.0",
+    "psr/http-factory": "^1.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "BootDesk\\ChatSDK\\Telnyx\\": "src/"
     },
-    "require-dev": {
-        "phpunit/phpunit": "^11.0"
-    },
-    "autoload": {
-        "psr-4": {
-            "BootDesk\\ChatSDK\\Telnyx\\": "src/"
-        },
-        "files": [
-            "src/register.php"
-        ]
-    },
-    "autoload-dev": {
-        "psr-4": {
-            "BootDesk\\ChatSDK\\Telnyx\\Tests\\": "tests/"
-        }
-    },
-    "extra": {
-        "laravel": {
-            "providers": [],
-            "aliases": []
-        }
-    },
-    "minimum-stability": "dev",
-    "prefer-stable": true
+    "files": [
+      "src/register.php"
+    ]
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "BootDesk\\ChatSDK\\Telnyx\\Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [],
+      "aliases": []
+    }
+  },
+  "minimum-stability": "dev",
+  "prefer-stable": true,
+  "version": "0.2.3"
 }
