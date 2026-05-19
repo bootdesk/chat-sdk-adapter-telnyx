@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BootDesk\ChatSDK\Telnyx;
 
+use BootDesk\ChatSDK\Core\Attachment;
 use BootDesk\ChatSDK\Core\Author;
 use BootDesk\ChatSDK\Core\Cards\Card;
 use BootDesk\ChatSDK\Core\ChannelInfo;
@@ -11,6 +12,8 @@ use BootDesk\ChatSDK\Core\Chat;
 use BootDesk\ChatSDK\Core\Contracts\Adapter;
 use BootDesk\ChatSDK\Core\Contracts\FileUploadConverter;
 use BootDesk\ChatSDK\Core\Contracts\FormatConverter;
+use BootDesk\ChatSDK\Core\Contracts\HandlesSlashCommands;
+use BootDesk\ChatSDK\Core\Contracts\HandlesStatuses;
 use BootDesk\ChatSDK\Core\Exceptions\AdapterException;
 use BootDesk\ChatSDK\Core\Exceptions\AuthenticationException;
 use BootDesk\ChatSDK\Core\FetchOptions;
@@ -26,7 +29,7 @@ use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 
-class TelnyxAdapter implements Adapter
+class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
 {
     protected TelnyxFormatConverter $formatConverter;
 
@@ -61,6 +64,125 @@ class TelnyxAdapter implements Adapter
     public function getBotUserId(): ?string
     {
         return $this->fromNumber;
+    }
+
+    public function parseStatus(ServerRequestInterface $request): ?array
+    {
+        $body = (string) $request->getBody();
+        $payload = json_decode($body, true);
+
+        if (! is_array($payload)) {
+            return null;
+        }
+
+        $event = $payload['data'] ?? [];
+        $eventType = $event['event_type'] ?? '';
+        $p = $event['payload'] ?? [];
+
+        // Only handle outbound status events
+        if ($eventType === 'message.received') {
+            return null;
+        }
+
+        $recipient = $p['to'][0] ?? [];
+        $status = $recipient['status'] ?? '';
+        $phoneNumber = $recipient['phone_number'] ?? '';
+
+        if ($phoneNumber === '' || $status === '') {
+            return null;
+        }
+
+        $common = [
+            'messageIds' => [$p['id'] ?? ''],
+            'threadId' => $this->encodeThreadId([
+                'from' => $p['from']['agent_id'] ?? $p['from']['phone_number'] ?? $this->fromNumber ?? '',
+                'to' => $phoneNumber,
+            ]),
+            'userId' => $phoneNumber,
+            'timestamp' => strtotime($p['completed_at'] ?? $event['occurred_at'] ?? '') ?: null,
+            'raw' => $payload,
+        ];
+
+        if ($status === 'delivered') {
+            return ['type' => 'delivered', ...$common];
+        }
+
+        if ($status === 'read') {
+            return ['type' => 'read', ...$common];
+        }
+
+        if (in_array($status, ['delivery_failed', 'sending_failed', 'delivery_unconfirmed'], true)) {
+            return ['type' => 'failed', ...$common];
+        }
+
+        return null;
+    }
+
+    public function parseSlashCommand(ServerRequestInterface $request): ?array
+    {
+        $body = (string) $request->getBody();
+        $payload = json_decode($body, true);
+
+        if (! is_array($payload)) {
+            return null;
+        }
+
+        $event = $payload['data'] ?? [];
+        $eventType = $event['event_type'] ?? '';
+
+        if ($eventType !== 'message.received') {
+            return null;
+        }
+
+        $p = $event['payload'] ?? [];
+        $type = strtoupper($p['type'] ?? '');
+        $isRcs = $type === 'RCS';
+
+        $text = $isRcs
+            ? ($p['body']['text'] ?? '')
+            : ($p['text'] ?? '');
+
+        // Skip RCS non-message events
+        if ($isRcs && isset($p['body']['event_type']) && $p['body']['event_type'] !== '') {
+            return null;
+        }
+
+        if ($text === '' || $text[0] !== '/') {
+            return null;
+        }
+
+        $fromPhone = $p['from']['phone_number'] ?? '';
+        $toEntry = $p['to'][0] ?? [];
+
+        if ($isRcs) {
+            $toPhone = is_array($toEntry) ? ($toEntry['agent_id'] ?? '') : '';
+        } else {
+            $toPhone = is_array($toEntry) ? ($toEntry['phone_number'] ?? '') : '';
+        }
+
+        if ($fromPhone === '') {
+            return null;
+        }
+
+        $threadId = $this->encodeThreadId([
+            'from' => $toPhone,
+            'to' => $fromPhone,
+        ]);
+
+        $parts = explode(' ', $text, 2);
+        $command = $parts[0];
+        $args = $parts[1] ?? '';
+
+        return [
+            'command' => $command,
+            'text' => $args,
+            'userId' => $fromPhone,
+            'isBot' => false,
+            'isMe' => false,
+            'channelId' => $threadId,
+            'triggerId' => null,
+            'raw' => $body,
+        ];
     }
 
     public function verifyWebhook(ServerRequestInterface $request): ?ResponseInterface
@@ -322,6 +444,17 @@ class TelnyxAdapter implements Adapter
         $body = $p['body'] ?? [];
         $messageId = $p['id'] ?? '';
 
+        // Non-message events like is_typing, read, etc.
+        if (isset($body['event_type']) && $body['event_type'] !== '') {
+            return new Message(
+                id: $messageId,
+                threadId: '',
+                author: new Author(id: '', isMe: true),
+                text: '',
+                raw: $rawBody,
+            );
+        }
+
         $text = $body['text'] ?? '';
 
         // Append suggestion response text
@@ -385,29 +518,77 @@ class TelnyxAdapter implements Adapter
         $messagingProfileId = $this->messagingProfileId
             ?? throw new AdapterException('messaging_profile_id is required for RCS messaging');
 
+        $text = $message->getTextContent();
+        $rcsText = mb_substr($text, 0, 3072);
+        $attachmentUrls = array_map(
+            fn (Attachment $att): string => $att->url,
+            array_filter($message->attachments, fn (Attachment $att): bool => $att->url !== ''),
+        );
+
+        $responses = [];
+
+        if ($message->isCard()) {
+            $responses[] = $this->sendRcsContent(
+                to: $to,
+                messagingProfileId: $messagingProfileId,
+                content: $this->buildRcsCardContent($message->content),
+                fallbackText: $text,
+                attachmentUrls: $attachmentUrls,
+                first: true
+            );
+        } elseif ($rcsText !== '') {
+            $responses[] = $this->sendRcsContent(
+                to: $to,
+                messagingProfileId: $messagingProfileId,
+                content: ['text' => $rcsText],
+                fallbackText: $text,
+                attachmentUrls: $attachmentUrls,
+                first: true
+            );
+        }
+
+        foreach ($message->attachments as $att) {
+            if ($att->url === '') {
+                continue;
+            }
+
+            $responses[] = $this->sendRcsContent(
+                to: $to,
+                messagingProfileId: $messagingProfileId,
+                content: [
+                    'content_info' => [
+                        'file_url' => $att->url,
+                    ],
+                ],
+                first: false
+            );
+        }
+
+        $last = end($responses);
+
+        return $last !== false ? $last : [];
+    }
+
+    protected function sendRcsContent(string $to, string $messagingProfileId, array $content, ?string $fallbackText = null, array $attachmentUrls = [], bool $first = false): array
+    {
         $params = [
             'agent_id' => $this->agentId,
             'to' => $to,
             'messaging_profile_id' => $messagingProfileId,
-            'agent_message' => $this->buildRcsAgentMessage($message),
+            'agent_message' => ['content_message' => $content],
         ];
 
-        if ($this->fromNumber !== null) {
-            $fallbackText = $message->getTextContent();
+        if ($first && $this->fromNumber !== null && $fallbackText !== null) {
             $params['sms_fallback'] = [
                 'from' => $this->fromNumber,
                 'text' => $fallbackText,
             ];
 
-            if ($message->attachments !== []) {
-                $mediaUrls = array_map(
-                    fn (array|string $att): string => is_array($att) ? ($att['url'] ?? '') : $att,
-                    $message->attachments,
-                );
+            if ($attachmentUrls !== []) {
                 $params['mms_fallback'] = [
                     'from' => $this->fromNumber,
                     'text' => $fallbackText,
-                    'media_urls' => array_filter($mediaUrls),
+                    'media_urls' => array_values($attachmentUrls),
                 ];
             }
         }
@@ -423,37 +604,12 @@ class TelnyxAdapter implements Adapter
 
         if ($message->attachments !== []) {
             $params['media_urls'] = array_map(
-                fn (array|string $att): string => is_array($att) ? ($att['url'] ?? '') : $att,
+                fn (Attachment $att): string => $att->url ?? '',
                 $message->attachments,
             );
         }
 
         return $params;
-    }
-
-    protected function buildRcsAgentMessage(PostableMessage $message): array
-    {
-        if ($message->isCard()) {
-            return ['content_message' => $this->buildRcsCardContent($message->content)];
-        }
-
-        $contentMessage = [];
-        $text = $message->getTextContent();
-
-        if ($text !== '') {
-            $contentMessage['text'] = $text;
-        }
-
-        foreach ($message->attachments as $att) {
-            $url = is_array($att) ? ($att['url'] ?? '') : $att;
-            if ($url !== '') {
-                $contentMessage['content_info'] = ['file_url' => $url];
-
-                break;
-            }
-        }
-
-        return ['content_message' => $contentMessage];
     }
 
     protected function buildRcsCardContent(Card $card): array
@@ -470,8 +626,15 @@ class TelnyxAdapter implements Adapter
                 $descriptions[] = $section->getText();
             }
         }
+        foreach ($card->getTables() as $table) {
+            $lines = [implode(' | ', $table->headers)];
+            foreach ($table->rows as $row) {
+                $lines[] = implode(' | ', $row);
+            }
+            $descriptions[] = implode("\n", $lines);
+        }
         if ($descriptions !== []) {
-            $cardContent['description'] = implode("\n", $descriptions);
+            $cardContent['description'] = mb_substr(implode("\n\n", $descriptions), 0, 2000);
         }
 
         $images = $card->getImages();

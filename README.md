@@ -18,7 +18,7 @@ Requires a PSR-18 HTTP client (`guzzlehttp/guzzle`, `symfony/http-client`, etc.)
 | `http_client` | PSR-18 HTTP client instance | `new GuzzleHttp\Client` |
 | `messaging_profile_id` | Messaging Profile UUID | `16fd2706-...` |
 | `public_key` | Ed25519 public key for webhook verification | `base64...` |
-| `from_number` | Default sender phone number (E.164) | `+15551234567` |
+| `from_number` | Sender ID — +E.164 phone number, alphanumeric sender ID, or short code | `+15551234567`, `MyBrand`, `123456` |
 | `agent_id` | RCS agent ID (enables RCS sending) | `e4448a5c...` |
 
 ```php
@@ -118,62 +118,46 @@ $adapter->postMessage(
 
 ### RCS fallback
 
-When `from_number` is set and RCS delivery fails, the adapter automatically includes `sms_fallback` and `mms_fallback` in the RCS request so Telnyx can downgrade to SMS/MMS.
+When `from_number` is set and the first RCS message includes `sms_fallback` / `mms_fallback`, Telnyx **may choose to send via SMS/MMS even if the recipient has RCS enabled** — it depends on the carrier's capabilities at that moment. This means you might see RCS-fallback messages delivered as SMS for no apparent reason.
 
-## Thread ID Format
+If you need strict RCS-only delivery (e.g., for rich cards, suggestions, or branding), register **two separate Telnyx adapters**:
 
-| Format | Description |
-|--------|-------------|
-| `telnyx:{fromNumber}:{toNumber}` | SMS/MMS conversation between two phone numbers |
-| `telnyx:{agentId}:{phoneNumber}` | RCS conversation between agent and user |
+```php
+$rcsAdapter = new TelnyxAdapter(
+    apiKey: env('TELNYX_API_KEY'),
+    httpClient: $client,
+    messagingProfileId: env('TELNYX_MESSAGING_PROFILE_ID'),
+    fromNumber: env('TELNYX_FROM_NUMBER'),
+    agentId: env('TELNYX_RCS_AGENT_ID'),
+    // No fromNumber — no fallback, RCS-only
+);
+$smsAdapter = new TelnyxAdapter(
+    apiKey: env('TELNYX_API_KEY'),
+    httpClient: $client,
+    messagingProfileId: env('TELNYX_MESSAGING_PROFILE_ID'),
+    fromNumber: env('TELNYX_FROM_NUMBER'),
+    // No agentId — SMS/MMS-only
+);
 
-For SMS/MMS, `fromNumber` is your Telnyx number (the bot), `toNumber` is the remote party.
-For RCS, `agentId` is your RCS agent, `phoneNumber` is the user's phone.
+$chat->registerAdapter('rcs', $rcsAdapter);
+$chat->registerAdapter('sms', $smsAdapter);
+```
 
-## Webhook
+Then route based on `$statusData['type'] === 'failed'` in your `onMessageFailed` handler: retry via the SMS adapter.
 
-Telnyx sends `message.received` events to your configured webhook URL. Signatures are verified using Ed25519 (`telnyx-signature-ed25519` + `telnyx-timestamp` headers) when `public_key` is configured.
+### RCS delivery reliability
 
-Configure the webhook URL on your Messaging Profile (for SMS/MMS) or RCS Agent (for RCS inbound) in the Telnyx Portal.
+RCS is a flaky protocol. Even when Telnyx accepts an RCS message (returns 200), the carrier may silently reject it or fail to deliver it. This is returned as a `delivery_failed` status event via `HandlesStatuses`. Key points:
 
-Other event types (`message.sent`, `message.finalized`, `message.read`) are silently ignored.
+- `delivery_failed` is **normal** and expected — do not treat it as a bug
+- Always implement the `onMessageFailed` handler to trigger SMS fallback
+- Some carriers/regions have no RCS support at all — all RCS messages will fail there
+- Users may have RCS disabled on their device — messages fall back silently
+- Read receipts (`message.read`) are **not guaranteed** — some users disable them
+- SMS fallback (`from_number`) is recommended for production use
 
-### Supported inbound event types
-
-| Type | Payload path |
-|------|-------------|
-| SMS | `payload.text` + `payload.media[]` (array of `{url, content_type}`) |
-| MMS | `payload.text` + `payload.media[]` (array of `{url, content_type}`) |
-| RCS text | `payload.body.text` |
-| RCS file | `payload.body.user_file.payload` |
-| RCS location | `payload.body.location` |
-| RCS suggestion | `payload.body.suggestion_response` |
-
-## Feature Matrix
-
-| Feature | Supported |
-|---------|-----------|
-| Post messages (SMS/MMS) | ✓ |
-| Post messages (RCS) | ✓ |
-| Edit messages | ✗ |
-| Delete messages | ✗ |
-| Reactions | ✗ |
-| Typing indicator | ✓ (RCS only) |
-| Fetch messages | ✗ |
-| Fetch thread info | ✓ (minimal) |
-| Fetch channel info | ✗ |
-| Get user | ✓ (phone number) |
-| Open DM | ✓ |
-| Stream | ✓ (collects then posts) |
-
-## Notes
-
-- SMS/MMS use `POST /v2/messages`; RCS uses `POST /v2/messages/rcs` (separate endpoint)
-- When `agent_id` is configured, outbound messages go through the RCS endpoint with SMS/MMS fallback
-- `messaging_profile_id` is **required** for RCS (throws if missing)
-- Requires `ext-sodium` for Ed25519 webhook signature verification
-- Phone numbers must be E.164 format (`+15551234567`)
-- RCS rich cards are auto-converted from the SDK `Card` system (title, description, media, suggestions)
+## Documentationn
+Full API documentation: https://bootdesk.github.io/chat-sdk
 
 ## License
 

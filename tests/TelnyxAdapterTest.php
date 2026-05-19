@@ -2,6 +2,7 @@
 
 namespace BootDesk\ChatSDK\Telnyx\Tests;
 
+use BootDesk\ChatSDK\Core\Attachment;
 use BootDesk\ChatSDK\Core\Cards\Button;
 use BootDesk\ChatSDK\Core\Cards\Card;
 use BootDesk\ChatSDK\Core\Chat;
@@ -403,7 +404,7 @@ class TelnyxAdapterTest extends TestCase
             'telnyx:+15551234567:+15559876543',
             new PostableMessage(
                 content: 'Photo',
-                attachments: [['url' => 'https://example.com/photo.jpg']],
+                attachments: [new Attachment(url: 'https://example.com/photo.jpg', type: 'image/jpeg')],
             )
         );
 
@@ -424,11 +425,11 @@ class TelnyxAdapterTest extends TestCase
             'telnyx:+15551234567:+15559876543',
             new PostableMessage(
                 content: 'Check this',
-                attachments: [['url' => 'https://example.com/file.pdf']],
+                attachments: [new Attachment(url: 'https://example.com/file.pdf', type: 'application/pdf')],
             )
         );
 
-        $sentBody = json_decode((string) $captured[0]->getBody(), true);
+        $sentBody = json_decode((string) $captured[1]->getBody(), true);
         $this->assertSame('https://example.com/file.pdf', $sentBody['agent_message']['content_message']['content_info']['file_url']);
     }
 
