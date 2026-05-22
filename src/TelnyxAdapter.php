@@ -184,6 +184,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         $args = $parts[1] ?? '';
 
         return [
+            'author' => new Author(id: $fromPhone),
             'command' => $command,
             'text' => $args,
             'userId' => $fromPhone,
