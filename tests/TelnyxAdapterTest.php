@@ -174,8 +174,8 @@ class TelnyxAdapterTest extends TestCase
 
         $this->assertSame('Check this photo', $message->text);
         $this->assertCount(1, $message->attachments);
-        $this->assertSame('https://example.com/photo.jpg', $message->attachments[0]['url']);
-        $this->assertSame('image/jpeg', $message->attachments[0]['type']);
+        $this->assertSame('https://example.com/photo.jpg', $message->attachments[0]->url);
+        $this->assertSame('image/jpeg', $message->attachments[0]->type);
     }
 
     public function test_parse_rcs_text_webhook(): void

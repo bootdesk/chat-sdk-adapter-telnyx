@@ -12,14 +12,14 @@ Requires a PSR-18 HTTP client (`guzzlehttp/guzzle`, `symfony/http-client`, etc.)
 
 ## Configuration
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `api_key` | Telnyx API V2 Key | `KEY...` |
-| `http_client` | PSR-18 HTTP client instance | `new GuzzleHttp\Client` |
-| `messaging_profile_id` | Messaging Profile UUID | `16fd2706-...` |
-| `public_key` | Ed25519 public key for webhook verification | `base64...` |
-| `from_number` | Sender ID — +E.164 phone number, alphanumeric sender ID, or short code | `+15551234567`, `MyBrand`, `123456` |
-| `agent_id` | RCS agent ID (enables RCS sending) | `e4448a5c...` |
+| Variable               | Description                                                            | Example                             |
+| ---------------------- | ---------------------------------------------------------------------- | ----------------------------------- |
+| `api_key`              | Telnyx API V2 Key                                                      | `KEY...`                            |
+| `http_client`          | PSR-18 HTTP client instance                                            | `new GuzzleHttp\Client`             |
+| `messaging_profile_id` | Messaging Profile UUID                                                 | `16fd2706-...`                      |
+| `public_key`           | Ed25519 public key for webhook verification                            | `base64...`                         |
+| `from_number`          | Sender ID — +E.164 phone number, alphanumeric sender ID, or short code | `+15551234567`, `MyBrand`, `123456` |
+| `agent_id`             | RCS agent ID (enables RCS sending)                                     | `e4448a5c...`                       |
 
 ```php
 use BootDesk\ChatSDK\Telnyx\TelnyxAdapter;
@@ -156,7 +156,25 @@ RCS is a flaky protocol. Even when Telnyx accepts an RCS message (returns 200), 
 - Read receipts (`message.read`) are **not guaranteed** — some users disable them
 - SMS fallback (`from_number`) is recommended for production use
 
+## Feature Matrix
+
+| Feature            | Supported |
+| ------------------ | --------- |
+| Post messages      | ✓         |
+| Edit messages      | ✗         |
+| Delete messages    | ✗         |
+| Reactions          | ✗         |
+| Slash commands     | ✓         |
+| Typing indicator   | ✗         |
+| Fetch messages     | ✗         |
+| Fetch thread info  | ✗         |
+| Fetch channel info | ✗         |
+| Get user           | ✗         |
+| Open DM            | ✗         |
+| Stream             | ✓         |
+
 ## Documentationn
+
 Full API documentation: https://bootdesk.github.io/chat-sdk
 
 ## License

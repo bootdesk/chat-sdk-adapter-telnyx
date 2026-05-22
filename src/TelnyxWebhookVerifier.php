@@ -9,6 +9,8 @@ use Psr\Http\Message\ServerRequestInterface;
 
 class TelnyxWebhookVerifier
 {
+    private const TIMESTAMP_MAX_AGE_SECONDS = 300;
+
     public function __construct(
         private readonly string $publicKey,
     ) {}
@@ -20,6 +22,13 @@ class TelnyxWebhookVerifier
 
         if ($signature === '' || $timestamp === '') {
             throw new AdapterException('Missing Telnyx webhook signature headers');
+        }
+
+        $timestampInt = (int) $timestamp;
+        $now = time();
+
+        if (abs($now - $timestampInt) > self::TIMESTAMP_MAX_AGE_SECONDS) {
+            throw new AdapterException('Stale timestamp - webhook timestamp too old or in future');
         }
 
         $payload = $timestamp.'|'.$body;

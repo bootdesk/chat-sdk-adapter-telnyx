@@ -16,6 +16,7 @@ use BootDesk\ChatSDK\Core\Contracts\HandlesSlashCommands;
 use BootDesk\ChatSDK\Core\Contracts\HandlesStatuses;
 use BootDesk\ChatSDK\Core\Exceptions\AdapterException;
 use BootDesk\ChatSDK\Core\Exceptions\AuthenticationException;
+use BootDesk\ChatSDK\Core\Exceptions\RateLimitException;
 use BootDesk\ChatSDK\Core\FetchOptions;
 use BootDesk\ChatSDK\Core\FetchResult;
 use BootDesk\ChatSDK\Core\Message;
@@ -31,6 +32,12 @@ use Psr\Http\Message\ServerRequestInterface;
 
 class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
 {
+    private const ADAPTER_NAME = 'telnyx-chat-sdk-php';
+
+    private const ADAPTER_VERSION = '0.2.5';
+
+    private const USER_AGENT = self::ADAPTER_NAME.'/'.self::ADAPTER_VERSION;
+
     protected TelnyxFormatConverter $formatConverter;
 
     protected ?TelnyxWebhookVerifier $webhookVerifier = null;
@@ -47,6 +54,8 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         protected readonly string $apiUrl = 'https://api.telnyx.com/v2/',
         protected readonly ?Psr17Factory $psrFactory = null,
         ?FileUploadConverter $fileUploadConverter = null,
+        protected readonly array $extraTags = [],
+        protected readonly bool $disableAttributionTags = false,
     ) {
         $this->formatConverter = new TelnyxFormatConverter;
         $this->fileUploadConverter = $fileUploadConverter ?? new NullFileUploadConverter;
@@ -101,6 +110,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
             'userId' => $phoneNumber,
             'timestamp' => strtotime($p['completed_at'] ?? $event['occurred_at'] ?? '') ?: null,
             'raw' => $payload,
+            'originId' => null,
         ];
 
         if ($status === 'delivered') {
@@ -410,10 +420,11 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         foreach ($media as $m) {
             $url = is_array($m) ? ($m['url'] ?? '') : $m;
             if ($url !== '') {
-                $attachments[] = [
-                    'url' => $url,
-                    'type' => is_array($m) ? ($m['content_type'] ?? 'media') : 'media',
-                ];
+                $attachments[] = new Attachment(
+                    type: is_array($m) ? ($m['content_type'] ?? 'media') : 'media',
+                    url: $url,
+                    mimeType: $m['content_type']
+                );
             }
         }
 
@@ -510,6 +521,11 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
             $params['messaging_profile_id'] = $this->messagingProfileId;
         }
 
+        $tags = $this->buildTags();
+        if ($tags !== []) {
+            $params['tags'] = $tags;
+        }
+
         return $this->apiCall('messages', $params);
     }
 
@@ -593,6 +609,11 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
             }
         }
 
+        $tags = $this->buildTags();
+        if ($tags !== []) {
+            $params['tags'] = $tags;
+        }
+
         return $this->apiCall('messages/rcs', $params);
     }
 
@@ -673,6 +694,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         $request = $factory->createRequest('POST', $this->apiUrl.$endpoint)
             ->withHeader('Authorization', "Bearer {$this->apiKey}")
             ->withHeader('Content-Type', 'application/json')
+            ->withHeader('User-Agent', self::USER_AGENT)
             ->withBody($factory->createStream($body));
 
         $psrResponse = $this->httpClient->sendRequest($request);
@@ -681,6 +703,18 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
 
         if ($statusCode < 200 || $statusCode >= 300) {
             $errorMsg = "Telnyx API returned HTTP {$statusCode} for {$endpoint}: {$responseBody}";
+
+            if ($statusCode === 429) {
+                $retryAfter = $psrResponse->getHeaderLine('retry-after');
+                $retryAfterInt = $retryAfter !== '' ? (int) $retryAfter : null;
+
+                throw new RateLimitException(
+                    $errorMsg,
+                    $statusCode,
+                    previous: null,
+                    retryAfter: $retryAfterInt
+                );
+            }
 
             if (in_array($statusCode, [401, 403], true)) {
                 throw new AuthenticationException($errorMsg);
@@ -709,5 +743,19 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         }
 
         return $data;
+    }
+
+    private function buildTags(): array
+    {
+        if ($this->disableAttributionTags) {
+            return $this->extraTags;
+        }
+
+        $attributionTags = [
+            self::ADAPTER_NAME,
+            'v'.self::ADAPTER_VERSION,
+        ];
+
+        return array_merge($attributionTags, $this->extraTags);
     }
 }
