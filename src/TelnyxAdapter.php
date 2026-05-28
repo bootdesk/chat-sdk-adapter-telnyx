@@ -12,6 +12,7 @@ use BootDesk\ChatSDK\Core\Chat;
 use BootDesk\ChatSDK\Core\Contracts\Adapter;
 use BootDesk\ChatSDK\Core\Contracts\FileUploadConverter;
 use BootDesk\ChatSDK\Core\Contracts\FormatConverter;
+use BootDesk\ChatSDK\Core\Contracts\HandlesMessageCosts;
 use BootDesk\ChatSDK\Core\Contracts\HandlesSlashCommands;
 use BootDesk\ChatSDK\Core\Contracts\HandlesStatuses;
 use BootDesk\ChatSDK\Core\Exceptions\AdapterException;
@@ -25,12 +26,16 @@ use BootDesk\ChatSDK\Core\SentMessage;
 use BootDesk\ChatSDK\Core\Support\NullFileUploadConverter;
 use BootDesk\ChatSDK\Core\ThreadInfo;
 use BootDesk\ChatSDK\Core\UserInfo;
+use Money\Currencies\ISOCurrencies;
+use Money\Currency;
+use Money\Money;
+use Money\Parser\DecimalMoneyParser;
 use Nyholm\Psr7\Factory\Psr17Factory;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 
-class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
+class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommands, HandlesStatuses
 {
     private const ADAPTER_NAME = 'telnyx-chat-sdk-php';
 
@@ -126,6 +131,60 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         }
 
         return null;
+    }
+
+    public function parseMessageCost(ServerRequestInterface $request): ?array
+    {
+        $body = (string) $request->getBody();
+        $payload = json_decode($body, true);
+
+        if (! is_array($payload)) {
+            return null;
+        }
+
+        $event = $payload['data'] ?? [];
+        $eventType = $event['event_type'] ?? '';
+        $p = $event['payload'] ?? [];
+
+        $cost = $p['cost'] ?? null;
+
+        if ($cost === null || ! isset($cost['amount'], $cost['currency'])) {
+            return null;
+        }
+
+        $isInbound = $eventType === 'message.received';
+        $recipient = $p['to'][0] ?? [];
+        $recipientPhone = $recipient['phone_number'] ?? '';
+
+        if ($recipientPhone === '') {
+            return null;
+        }
+
+        $senderPhone = $p['from']['phone_number'] ?? '';
+        $senderAgentId = $p['from']['agent_id'] ?? '';
+
+        if ($senderPhone === '' && $senderAgentId === '') {
+            return null;
+        }
+
+        $threadFrom = $isInbound ? $recipientPhone : ($senderAgentId ?: $senderPhone);
+        $threadTo = $isInbound ? $senderPhone : $recipientPhone;
+        $userId = $isInbound ? $senderPhone : $recipientPhone;
+
+        static $parser = null;
+        $parser ??= new DecimalMoneyParser(new ISOCurrencies);
+
+        return [
+            'messageIds' => [$p['id'] ?? ''],
+            'threadId' => $this->encodeThreadId([
+                'from' => $threadFrom,
+                'to' => $threadTo,
+            ]),
+            'userId' => $userId,
+            'price' => $parser->parse($cost['amount'], new Currency($cost['currency'])),
+            'raw' => $payload,
+            'originId' => null,
+        ];
     }
 
     public function parseSlashCommand(ServerRequestInterface $request): ?array
@@ -282,17 +341,36 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         }
 
         if ($this->agentId !== null) {
-            $response = $this->sendRcs($decoded['to'], $message);
+            $responses = $this->sendRcs($decoded['to'], $message);
         } else {
-            $response = $this->sendSms($decoded['from'], $decoded['to'], $message);
+            $responses = [$this->sendSms($decoded['from'], $decoded['to'], $message)];
         }
 
-        $data = $response['data'] ?? $response;
+        if ($responses === []) {
+            return new SentMessage(id: '', threadId: $threadId);
+        }
+
+        $primary = $responses[0];
+        $primaryData = $primary['data'] ?? $primary;
+
+        $additionalMessages = array_map(
+            fn (array $res): SentMessage => new SentMessage(
+                id: ($res['data'] ?? $res)['id'] ?? '',
+                threadId: $threadId,
+                timestamp: ($res['data'] ?? $res)['sent_at'] ?? null,
+                raw: $res,
+                price: $this->parseCost($res['data'] ?? $res),
+            ),
+            array_slice($responses, 1),
+        );
 
         return new SentMessage(
-            id: $data['id'] ?? '',
+            id: $primaryData['id'] ?? '',
             threadId: $threadId,
-            timestamp: $data['sent_at'] ?? null,
+            timestamp: $primaryData['sent_at'] ?? null,
+            additionalMessages: $additionalMessages,
+            raw: $responses,
+            price: $this->parseCost($primaryData),
         );
     }
 
@@ -444,6 +522,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
             isMention: false,
             isDM: true,
             raw: $rawBody,
+            price: $this->parseCost($p),
         );
     }
 
@@ -464,6 +543,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
                 author: new Author(id: '', isMe: true),
                 text: '',
                 raw: $rawBody,
+                price: $this->parseCost($p),
             );
         }
 
@@ -509,6 +589,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
             isMention: false,
             isDM: true,
             raw: $rawBody,
+            price: $this->parseCost($p),
         );
     }
 
@@ -581,9 +662,7 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
             );
         }
 
-        $last = end($responses);
-
-        return $last !== false ? $last : [];
+        return $responses;
     }
 
     protected function sendRcsContent(string $to, string $messagingProfileId, array $content, ?string $fallbackText = null, array $attachmentUrls = [], bool $first = false): array
@@ -758,5 +837,19 @@ class TelnyxAdapter implements Adapter, HandlesSlashCommands, HandlesStatuses
         ];
 
         return array_merge($attributionTags, $this->extraTags);
+    }
+
+    protected function parseCost(array $data): ?Money
+    {
+        $cost = $data['cost'] ?? null;
+
+        if ($cost === null || ! isset($cost['amount'], $cost['currency'])) {
+            return null;
+        }
+
+        static $parser = null;
+        $parser ??= new DecimalMoneyParser(new ISOCurrencies);
+
+        return $parser->parse($cost['amount'], new Currency($cost['currency']));
     }
 }

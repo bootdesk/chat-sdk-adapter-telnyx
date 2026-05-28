@@ -9,7 +9,9 @@ use BootDesk\ChatSDK\Core\Chat;
 use BootDesk\ChatSDK\Core\Exceptions\AdapterException;
 use BootDesk\ChatSDK\Core\Exceptions\AuthenticationException;
 use BootDesk\ChatSDK\Core\PostableMessage;
+use BootDesk\ChatSDK\Core\SentMessage;
 use BootDesk\ChatSDK\Telnyx\TelnyxAdapter;
+use Money\Money;
 use Nyholm\Psr7\Factory\Psr17Factory;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Client\ClientInterface;
@@ -299,6 +301,86 @@ class TelnyxAdapterTest extends TestCase
         $this->assertStringContainsString('-85.783784', $message->text);
     }
 
+    public function test_parse_sms_webhook_includes_price(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.received',
+                'payload' => [
+                    'id' => 'msg-price-001',
+                    'direction' => 'inbound',
+                    'type' => 'SMS',
+                    'from' => ['phone_number' => '+13125550001'],
+                    'to' => [['phone_number' => '+15551234567', 'status' => 'webhook_delivered']],
+                    'text' => 'Hello',
+                    'media' => [],
+                    'cost' => ['amount' => '0.0050', 'currency' => 'USD'],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $message = $this->adapter->parseWebhook($request);
+
+        $this->assertNotNull($message->price);
+        $this->assertSame('1', $message->price->getAmount());
+        $this->assertSame('USD', $message->price->getCurrency()->getCode());
+    }
+
+    public function test_parse_sms_webhook_price_defaults_to_null(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.received',
+                'payload' => [
+                    'id' => 'msg-no-price',
+                    'direction' => 'inbound',
+                    'type' => 'SMS',
+                    'from' => ['phone_number' => '+13125550001'],
+                    'to' => [['phone_number' => '+15551234567', 'status' => 'webhook_delivered']],
+                    'text' => 'Hello',
+                    'media' => [],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $message = $this->adapter->parseWebhook($request);
+
+        $this->assertNull($message->price);
+    }
+
+    public function test_parse_rcs_webhook_includes_price(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.received',
+                'payload' => [
+                    'id' => 'rcs-price-001',
+                    'direction' => 'inbound',
+                    'type' => 'RCS',
+                    'from' => ['phone_number' => '+13125550001'],
+                    'to' => [['agent_id' => 'e4448a5c0670c2a9']],
+                    'body' => ['text' => 'Hello RCS!'],
+                    'cost' => ['amount' => '0.0500', 'currency' => 'USD'],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $message = $this->adapter->parseWebhook($request);
+
+        $this->assertNotNull($message->price);
+        $this->assertSame('5', $message->price->getAmount());
+        $this->assertSame('USD', $message->price->getCurrency()->getCode());
+    }
+
     public function test_parse_webhook_ignores_non_received_events(): void
     {
         $body = json_encode([
@@ -315,6 +397,145 @@ class TelnyxAdapterTest extends TestCase
 
         $this->assertTrue($message->author->isMe);
         $this->assertSame('', $message->text);
+    }
+
+    public function test_parse_message_cost_from_finalized_event(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.finalized',
+                'payload' => [
+                    'id' => 'msg-001',
+                    'from' => ['phone_number' => '+15551234567'],
+                    'to' => [['phone_number' => '+15559876543', 'status' => 'delivered']],
+                    'cost' => ['amount' => '0.0500', 'currency' => 'USD'],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $result = $this->adapter->parseMessageCost($request);
+
+        $this->assertNotNull($result);
+        $this->assertSame(['msg-001'], $result['messageIds']);
+        $this->assertSame('telnyx:+15551234567:+15559876543', $result['threadId']);
+        $this->assertSame('+15559876543', $result['userId']);
+        $this->assertInstanceOf(Money::class, $result['price']);
+        $this->assertSame('5', $result['price']->getAmount());
+        $this->assertSame('USD', $result['price']->getCurrency()->getCode());
+        $this->assertNull($result['originId']);
+    }
+
+    public function test_parse_message_cost_from_inbound_event(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.received',
+                'payload' => [
+                    'id' => 'msg-inbound-001',
+                    'from' => ['phone_number' => '+13125550001'],
+                    'to' => [['phone_number' => '+15551234567', 'status' => 'webhook_delivered']],
+                    'cost' => ['amount' => '0.0050', 'currency' => 'USD'],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $result = $this->adapter->parseMessageCost($request);
+
+        $this->assertNotNull($result);
+        $this->assertSame('1', $result['price']->getAmount());
+        $this->assertSame('USD', $result['price']->getCurrency()->getCode());
+        $this->assertSame('telnyx:+15551234567:+13125550001', $result['threadId']);
+        $this->assertSame('+13125550001', $result['userId']);
+    }
+
+    public function test_parse_message_cost_returns_null_when_no_cost(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.finalized',
+                'payload' => [
+                    'id' => 'msg-002',
+                    'from' => ['phone_number' => '+15551234567'],
+                    'to' => [['phone_number' => '+15559876543', 'status' => 'delivered']],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $this->assertNull($this->adapter->parseMessageCost($request));
+    }
+
+    public function test_parse_message_cost_returns_null_for_invalid_json(): void
+    {
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream('not json'));
+
+        $this->assertNull($this->adapter->parseMessageCost($request));
+    }
+
+    public function test_parse_message_cost_with_eur(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.finalized',
+                'payload' => [
+                    'id' => 'msg-003',
+                    'from' => ['phone_number' => '+15551234567'],
+                    'to' => [['phone_number' => '+15559876543', 'status' => 'delivered']],
+                    'cost' => ['amount' => '0.1234', 'currency' => 'EUR'],
+                ],
+            ],
+        ]);
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $result = $this->adapter->parseMessageCost($request);
+
+        $this->assertNotNull($result);
+        $this->assertSame('12', $result['price']->getAmount());
+        $this->assertSame('EUR', $result['price']->getCurrency()->getCode());
+    }
+
+    public function test_parse_message_cost_handles_rcs_agent_id_thread(): void
+    {
+        $body = json_encode([
+            'data' => [
+                'event_type' => 'message.finalized',
+                'payload' => [
+                    'id' => 'rcs-msg-001',
+                    'from' => ['agent_id' => 'agent-123'],
+                    'to' => [['phone_number' => '+15559876543', 'status' => 'delivered']],
+                    'cost' => ['amount' => '0.0100', 'currency' => 'USD'],
+                ],
+            ],
+        ]);
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            messagingProfileId: 'profile-123',
+            fromNumber: '+15551234567',
+            agentId: 'agent-123',
+            httpClient: $this->createMock(ClientInterface::class),
+            psrFactory: $this->factory,
+        );
+
+        $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
+            ->withBody($this->factory->createStream($body));
+
+        $result = $adapter->parseMessageCost($request);
+
+        $this->assertNotNull($result);
+        $this->assertSame('telnyx:agent-123:+15559876543', $result['threadId']);
+        $this->assertSame('1', $result['price']->getAmount());
     }
 
     public function test_post_sms_message(): void
@@ -344,6 +565,148 @@ class TelnyxAdapterTest extends TestCase
         $this->assertSame('profile-123', $sentBody['messaging_profile_id']);
         $this->assertStringContainsString('/messages', (string) $this->capturedRequests[0]->getUri());
         $this->assertStringNotContainsString('/messages/rcs', (string) $this->capturedRequests[0]->getUri());
+    }
+
+    public function test_post_sms_price_defaults_to_null(): void
+    {
+        $sent = $this->adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello')
+        );
+
+        $this->assertNull($sent->price);
+    }
+
+    public function test_post_sms_includes_price(): void
+    {
+        $factory = $this->factory;
+        $captured = [];
+
+        $mockClient = new class($captured, $factory) implements ClientInterface
+        {
+            private array $captured;
+
+            private Psr17Factory $factory;
+
+            public function __construct(array &$captured, Psr17Factory $factory)
+            {
+                $this->captured = &$captured;
+                $this->factory = $factory;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->captured[] = $request;
+
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'msg-001',
+                            'direction' => 'outbound',
+                            'type' => 'SMS',
+                            'cost' => [
+                                'amount' => '0.0500',
+                                'currency' => 'USD',
+                            ],
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello')
+        );
+
+        $this->assertInstanceOf(Money::class, $sent->price);
+        $this->assertSame('5', $sent->price->getAmount());
+        $this->assertSame('USD', $sent->price->getCurrency()->getCode());
+    }
+
+    public function test_post_sms_includes_price_with_eur(): void
+    {
+        $factory = $this->factory;
+
+        $mockClient = new class($factory) implements ClientInterface
+        {
+            public function __construct(
+                private Psr17Factory $factory,
+            ) {}
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'msg-002',
+                            'cost' => [
+                                'amount' => '0.1234',
+                                'currency' => 'EUR',
+                            ],
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello')
+        );
+
+        $this->assertNotNull($sent->price);
+        $this->assertSame('12', $sent->price->getAmount()); // 0.1234 EUR → 12 cents
+        $this->assertSame('EUR', $sent->price->getCurrency()->getCode());
+    }
+
+    public function test_post_sms_price_ignores_missing_cost(): void
+    {
+        $factory = $this->factory;
+
+        $mockClient = new class($factory) implements ClientInterface
+        {
+            public function __construct(
+                private Psr17Factory $factory,
+            ) {}
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'msg-003',
+                            // no cost key
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello')
+        );
+
+        $this->assertNull($sent->price);
     }
 
     public function test_post_rcs_message_uses_rcs_endpoint(): void
@@ -694,6 +1057,304 @@ class TelnyxAdapterTest extends TestCase
 
         $this->expectException(AuthenticationException::class);
         $adapter->postMessage('telnyx:+15551234567:+15559876543', PostableMessage::text('test'));
+    }
+
+    public function test_post_sms_includes_raw_response(): void
+    {
+        $sent = $this->adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello SMS')
+        );
+
+        $this->assertNotNull($sent->raw);
+        $this->assertIsArray($sent->raw);
+        // raw is an array of all responses (one for SMS)
+        $this->assertCount(1, $sent->raw);
+        $this->assertArrayHasKey('data', $sent->raw[0]);
+        $this->assertSame('b0c7e8cb-6227-4c74-9f32-c7f80c30934b', $sent->raw[0]['data']['id']);
+    }
+
+    public function test_post_rcs_includes_raw_response(): void
+    {
+        $adapter = $this->createRcsAdapter();
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello RCS')
+        );
+
+        $this->assertNotNull($sent->raw);
+        $this->assertIsArray($sent->raw);
+        // RCS returns a single-element array for one call
+        $this->assertCount(1, $sent->raw);
+        $this->assertSame('rcs-msg-001', $sent->raw[0]['data']['id']);
+    }
+
+    public function test_post_rcs_with_attachments_returns_additional_messages(): void
+    {
+        $factory = $this->factory;
+        $callCount = 0;
+
+        $mockClient = new class($factory, $callCount) implements ClientInterface
+        {
+            private Psr17Factory $factory;
+
+            private int $callCount;
+
+            public function __construct(Psr17Factory $factory, int &$callCount)
+            {
+                $this->factory = $factory;
+                $this->callCount = &$callCount;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->callCount++;
+
+                // Return a unique ID per call so we can verify each SentMessage
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'rcs-msg-'.sprintf('%03d', $this->callCount),
+                            'agent_id' => 'agent-123',
+                            'to' => '+15559876543',
+                            'status' => 'queued',
+                            'sent_at' => '2024-01-15T21:32:1'.(9 + $this->callCount).'.596+00:00',
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            messagingProfileId: 'profile-123',
+            fromNumber: '+15551234567',
+            agentId: 'agent-123',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            new PostableMessage(
+                content: 'Check this',
+                attachments: [
+                    new Attachment(url: 'https://example.com/photo.jpg', type: 'image/jpeg'),
+                    new Attachment(url: 'https://example.com/doc.pdf', type: 'application/pdf'),
+                ],
+            )
+        );
+
+        // 1 text message + 2 attachments = 3 API calls
+        $this->assertCount(2, $sent->additionalMessages);
+        $this->assertSame('rcs-msg-001', $sent->id);
+        $this->assertSame('rcs-msg-002', $sent->additionalMessages[0]->id);
+        $this->assertSame('rcs-msg-003', $sent->additionalMessages[1]->id);
+    }
+
+    public function test_post_rcs_with_attachments_sets_raw_responses(): void
+    {
+        $factory = $this->factory;
+        $callCount = 0;
+
+        $mockClient = new class($factory, $callCount) implements ClientInterface
+        {
+            private Psr17Factory $factory;
+
+            private int $callCount;
+
+            public function __construct(Psr17Factory $factory, int &$callCount)
+            {
+                $this->factory = $factory;
+                $this->callCount = &$callCount;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->callCount++;
+
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'rcs-msg-'.sprintf('%03d', $this->callCount),
+                            'status' => 'queued',
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            messagingProfileId: 'profile-123',
+            fromNumber: '+15551234567',
+            agentId: 'agent-123',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            new PostableMessage(
+                content: 'Files',
+                attachments: [
+                    new Attachment(url: 'https://example.com/file.pdf', type: 'application/pdf'),
+                ],
+            )
+        );
+
+        // raw should be an array of all responses
+        $this->assertIsArray($sent->raw);
+        $this->assertCount(2, $sent->raw);
+        $this->assertSame('rcs-msg-001', $sent->raw[0]['data']['id']);
+        $this->assertSame('rcs-msg-002', $sent->raw[1]['data']['id']);
+
+        // additionalMessages should each have their own raw
+        $this->assertCount(1, $sent->additionalMessages);
+        $this->assertIsArray($sent->additionalMessages[0]->raw);
+        $this->assertSame('rcs-msg-002', $sent->additionalMessages[0]->raw['data']['id']);
+    }
+
+    public function test_post_rcs_text_only_returns_no_additional_messages(): void
+    {
+        $adapter = $this->createRcsAdapter();
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Just text')
+        );
+
+        $this->assertSame([], $sent->additionalMessages);
+    }
+
+    public function test_post_rcs_price_defaults_to_null(): void
+    {
+        $adapter = $this->createRcsAdapter();
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello')
+        );
+
+        $this->assertNull($sent->price);
+    }
+
+    public function test_post_rcs_includes_price(): void
+    {
+        $factory = $this->factory;
+
+        $mockClient = new class($factory) implements ClientInterface
+        {
+            public function __construct(
+                private Psr17Factory $factory,
+            ) {}
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'rcs-msg-001',
+                            'agent_id' => 'agent-123',
+                            'to' => '+15559876543',
+                            'status' => 'queued',
+                            'sent_at' => '2024-01-15T21:32:19.596+00:00',
+                            'cost' => [
+                                'amount' => '0.0325',
+                                'currency' => 'USD',
+                            ],
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            messagingProfileId: 'profile-123',
+            fromNumber: '+15551234567',
+            agentId: 'agent-123',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            PostableMessage::text('Hello RCS')
+        );
+
+        $this->assertInstanceOf(Money::class, $sent->price);
+        $this->assertSame('3', $sent->price->getAmount()); // 0.0325 USD → 3 cents
+        $this->assertSame('USD', $sent->price->getCurrency()->getCode());
+    }
+
+    public function test_post_rcs_includes_price_for_additional_messages(): void
+    {
+        $factory = $this->factory;
+        $callCount = 0;
+
+        $mockClient = new class($factory, $callCount) implements ClientInterface
+        {
+            public function __construct(
+                private Psr17Factory $factory,
+                private int &$callCount,
+            ) {}
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->callCount++;
+
+                $prices = [
+                    1 => ['amount' => '0.0500', 'currency' => 'USD'],
+                    2 => ['amount' => '0.0325', 'currency' => 'USD'],
+                ];
+                $price = $prices[$this->callCount] ?? ['amount' => '0.0100', 'currency' => 'USD'];
+
+                return $this->factory->createResponse(200)->withBody(
+                    $this->factory->createStream(json_encode([
+                        'data' => [
+                            'id' => 'rcs-msg-'.sprintf('%03d', $this->callCount),
+                            'agent_id' => 'agent-123',
+                            'to' => '+15559876543',
+                            'status' => 'queued',
+                            'sent_at' => '2024-01-15T21:32:19.596+00:00',
+                            'cost' => $price,
+                        ],
+                    ]))
+                );
+            }
+        };
+
+        $adapter = new TelnyxAdapter(
+            apiKey: 'test_api_key',
+            messagingProfileId: 'profile-123',
+            fromNumber: '+15551234567',
+            agentId: 'agent-123',
+            httpClient: $mockClient,
+            psrFactory: $factory,
+        );
+
+        $sent = $adapter->postMessage(
+            'telnyx:+15551234567:+15559876543',
+            new PostableMessage(
+                content: 'Hello RCS',
+                attachments: [
+                    new Attachment(type: 'image', url: 'https://example.com/img.png'),
+                ],
+            )
+        );
+
+        // Primary message: 0.0500 USD → 5 cents
+        $this->assertNotNull($sent->price);
+        $this->assertSame('5', $sent->price->getAmount());
+        $this->assertSame('USD', $sent->price->getCurrency()->getCode());
+
+        // Additional message: 0.0325 USD → 3 cents (truncated to 2 decimal places)
+        $this->assertCount(1, $sent->additionalMessages);
+        $this->assertNotNull($sent->additionalMessages[0]->price);
+        $this->assertSame('3', $sent->additionalMessages[0]->price->getAmount());
+        $this->assertSame('USD', $sent->additionalMessages[0]->price->getCurrency()->getCode());
     }
 
     private function createRcsAdapter(): TelnyxAdapter
