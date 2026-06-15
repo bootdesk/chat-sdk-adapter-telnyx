@@ -18,6 +18,7 @@ use BootDesk\ChatSDK\Core\Contracts\HandlesStatuses;
 use BootDesk\ChatSDK\Core\Exceptions\AdapterException;
 use BootDesk\ChatSDK\Core\Exceptions\AuthenticationException;
 use BootDesk\ChatSDK\Core\Exceptions\RateLimitException;
+use BootDesk\ChatSDK\Core\Exceptions\UnsupportedOperationException;
 use BootDesk\ChatSDK\Core\FetchOptions;
 use BootDesk\ChatSDK\Core\FetchResult;
 use BootDesk\ChatSDK\Core\Message;
@@ -278,16 +279,7 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
         $p = $event['payload'] ?? [];
 
         if ($eventType !== 'message.received') {
-            return new Message(
-                id: $event['id'] ?? '',
-                threadId: '',
-                author: new Author(id: '', isMe: true),
-                text: '',
-                formatted: $this->formatConverter->toAst(''),
-                isMention: false,
-                isDM: false,
-                raw: $body,
-            );
+            throw new UnsupportedOperationException('Unsupported Telnyx webhook event type: '.$eventType);
         }
 
         $type = $p['type'] ?? 'SMS';

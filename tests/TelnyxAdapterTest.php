@@ -8,6 +8,7 @@ use BootDesk\ChatSDK\Core\Cards\Card;
 use BootDesk\ChatSDK\Core\Chat;
 use BootDesk\ChatSDK\Core\Exceptions\AdapterException;
 use BootDesk\ChatSDK\Core\Exceptions\AuthenticationException;
+use BootDesk\ChatSDK\Core\Exceptions\UnsupportedOperationException;
 use BootDesk\ChatSDK\Core\PostableMessage;
 use BootDesk\ChatSDK\Core\SentMessage;
 use BootDesk\ChatSDK\Telnyx\TelnyxAdapter;
@@ -383,6 +384,8 @@ class TelnyxAdapterTest extends TestCase
 
     public function test_parse_webhook_ignores_non_received_events(): void
     {
+        $this->expectException(UnsupportedOperationException::class);
+
         $body = json_encode([
             'data' => [
                 'event_type' => 'message.finalized',
@@ -393,10 +396,7 @@ class TelnyxAdapterTest extends TestCase
         $request = $this->factory->createServerRequest('POST', '/webhooks/telnyx')
             ->withBody($this->factory->createStream($body));
 
-        $message = $this->adapter->parseWebhook($request);
-
-        $this->assertTrue($message->author->isMe);
-        $this->assertSame('', $message->text);
+        $this->adapter->parseWebhook($request);
     }
 
     public function test_parse_message_cost_from_finalized_event(): void
