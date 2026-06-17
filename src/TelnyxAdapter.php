@@ -783,7 +783,6 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
                 throw new RateLimitException(
                     $errorMsg,
                     $statusCode,
-                    previous: null,
                     retryAfter: $retryAfterInt
                 );
             }
