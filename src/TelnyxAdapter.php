@@ -312,7 +312,9 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
 
     public function channelIdFromThreadId(string $threadId): string
     {
-        return $this->decodeThreadId($threadId)['from'];
+        $decoded = $this->decodeThreadId($threadId);
+
+        return "telnyx:{$decoded['from']}";
     }
 
     public function postMessage(string $threadId, PostableMessage $message): SentMessage

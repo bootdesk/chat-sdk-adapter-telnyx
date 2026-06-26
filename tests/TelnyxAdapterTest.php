@@ -118,7 +118,7 @@ class TelnyxAdapterTest extends TestCase
 
     public function test_channel_id_from_thread(): void
     {
-        $this->assertSame('+15551234567', $this->adapter->channelIdFromThreadId('telnyx:+15551234567:+15559876543'));
+        $this->assertSame('telnyx:+15551234567', $this->adapter->channelIdFromThreadId('telnyx:+15551234567:+15559876543'));
     }
 
     public function test_parse_sms_webhook(): void
