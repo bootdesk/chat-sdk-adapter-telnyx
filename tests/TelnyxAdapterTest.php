@@ -237,9 +237,9 @@ class TelnyxAdapterTest extends TestCase
         $message = $this->adapter->parseWebhook($request);
 
         $this->assertCount(1, $message->attachments);
-        $this->assertSame('https://storage.example.com/photo.jpg', $message->attachments[0]['url']);
-        $this->assertSame('image/jpeg', $message->attachments[0]['type']);
-        $this->assertSame('photo.jpg', $message->attachments[0]['name']);
+        $this->assertSame('https://storage.example.com/photo.jpg', $message->attachments[0]->url);
+        $this->assertSame('image/jpeg', $message->attachments[0]->mimeType);
+        $this->assertSame('photo.jpg', $message->attachments[0]->name);
     }
 
     public function test_parse_rcs_suggestion_response(): void
@@ -298,8 +298,11 @@ class TelnyxAdapterTest extends TestCase
 
         $message = $this->adapter->parseWebhook($request);
 
-        $this->assertStringContainsString('38.249613', $message->text);
-        $this->assertStringContainsString('-85.783784', $message->text);
+        $this->assertCount(1, $message->attachments);
+        $this->assertSame('location', $message->attachments[0]->type);
+        $this->assertSame(38.249613, $message->attachments[0]->lat);
+        $this->assertSame(-85.783784, $message->attachments[0]->lng);
+        $this->assertStringContainsString('geo+json', $message->attachments[0]->url);
     }
 
     public function test_parse_sms_webhook_includes_price(): void

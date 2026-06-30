@@ -334,6 +334,24 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             );
         }
 
+        // Location fallback — no native outgoing support, append maps link to text
+        if ($message->attachments !== [] && $message->attachments[0]->type === 'location') {
+            $att = $message->attachments[0];
+            $locText = "https://www.google.com/maps?q={$att->lat},{$att->lng}";
+            if ($att->name !== null) {
+                $locText = $att->name."\n".$locText;
+            }
+            if ($att->address !== null) {
+                $locText .= "\n".$att->address;
+            }
+            $originalText = $message->getTextContent();
+            $mergedText = $originalText !== '' ? $originalText."\n\n".$locText : $locText;
+            $message = new PostableMessage(
+                content: $mergedText,
+                replyToMessageId: $message->replyToMessageId,
+            );
+        }
+
         if ($this->agentId !== null) {
             $responses = $this->sendRcs($decoded['to'], $message);
         } else {
@@ -550,22 +568,23 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             $text = ($text !== '' ? $text."\n" : '')."[{$label}] ({$postback})";
         }
 
-        // Append location
-        if (isset($body['location'])) {
-            $lat = $body['location']['latitude'] ?? '';
-            $lng = $body['location']['longitude'] ?? '';
-            $text = ($text !== '' ? $text."\n" : '')."Location: {$lat}, {$lng}";
-        }
-
         $attachments = [];
+        if (isset($body['location'])) {
+            $loc = $body['location'];
+            $attachments[] = Attachment::location(
+                lat: (float) ($loc['latitude'] ?? 0),
+                lng: (float) ($loc['longitude'] ?? 0),
+            );
+        }
         if (isset($body['user_file'])) {
             $file = $body['user_file']['payload'] ?? $body['user_file'];
-            $attachments[] = [
-                'url' => $file['file_uri'] ?? '',
-                'type' => $file['mime_type'] ?? 'application/octet-stream',
-                'name' => $file['file_name'] ?? '',
-                'size' => $file['file_size_bytes'] ?? 0,
-            ];
+            $attachments[] = new Attachment(
+                type: 'file',
+                url: $file['file_uri'] ?? '',
+                name: $file['file_name'] ?? '',
+                mimeType: $file['mime_type'] ?? null,
+                size: isset($file['file_size_bytes']) ? (int) $file['file_size_bytes'] : null,
+            );
         }
 
         $threadId = $this->encodeThreadId([
