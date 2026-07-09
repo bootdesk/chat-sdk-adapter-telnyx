@@ -35,6 +35,8 @@ use Nyholm\Psr7\Factory\Psr17Factory;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommands, HandlesStatuses
 {
@@ -50,6 +52,8 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
 
     protected FileUploadConverter $fileUploadConverter;
 
+    protected readonly ?LoggerInterface $logger;
+
     public function __construct(
         protected readonly string $apiKey,
         protected readonly ClientInterface $httpClient,
@@ -62,7 +66,9 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
         ?FileUploadConverter $fileUploadConverter = null,
         protected readonly array $extraTags = [],
         protected readonly bool $disableAttributionTags = false,
+        ?LoggerInterface $logger = null,
     ) {
+        $this->logger = $logger ?? new NullLogger;
         $this->formatConverter = new TelnyxFormatConverter;
         $this->fileUploadConverter = $fileUploadConverter ?? new NullFileUploadConverter;
 
@@ -271,6 +277,7 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
         $payload = json_decode($body, true);
 
         if ($payload === null) {
+            $this->logger->error('Invalid JSON payload from Telnyx');
             throw new AdapterException('Invalid JSON payload from Telnyx');
         }
 
@@ -320,6 +327,7 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
     public function postMessage(string $threadId, PostableMessage $message): SentMessage
     {
         $decoded = $this->decodeThreadId($threadId);
+        $this->logger->info('Telnyx postMessage', ['threadId' => $threadId, 'to' => $decoded['to']]);
 
         // Convert files to attachments via the registered converter
         if ($message->files !== []) {
@@ -524,6 +532,8 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             'to' => $fromPhone,
         ]);
 
+        $this->logger->info('Telnyx SMS message parsed', ['threadId' => $threadId]);
+
         return new Message(
             id: $messageId,
             threadId: $threadId,
@@ -591,6 +601,8 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             'from' => $toPhone,
             'to' => $fromPhone,
         ]);
+
+        $this->logger->info('Telnyx RCS message parsed', ['threadId' => $threadId]);
 
         return new Message(
             id: $messageId,
@@ -790,12 +802,16 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             ->withHeader('User-Agent', self::USER_AGENT)
             ->withBody($factory->createStream($body));
 
+        $this->logger->debug('Telnyx API request', ['url' => $this->apiUrl.$endpoint, 'method' => 'POST']);
+
         $psrResponse = $this->httpClient->sendRequest($request);
         $statusCode = $psrResponse->getStatusCode();
         $responseBody = (string) $psrResponse->getBody();
 
         if ($statusCode < 200 || $statusCode >= 300) {
             $errorMsg = "Telnyx API returned HTTP {$statusCode} for {$endpoint}: {$responseBody}";
+
+            $this->logger->error('Telnyx API HTTP error', ['endpoint' => $endpoint, 'status' => $statusCode, 'response' => $responseBody]);
 
             if ($statusCode === 429) {
                 $retryAfter = $psrResponse->getHeaderLine('retry-after');
@@ -826,6 +842,8 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             $error = $errors[0] ?? [];
             $code = $error['code'] ?? 'unknown';
             $detail = $error['detail'] ?? ($error['title'] ?? 'unknown error');
+
+            $this->logger->error('Telnyx API response error', ['endpoint' => $endpoint, 'code' => $code, 'detail' => $detail]);
 
             if (in_array($code, ['401', '403', 'unauthorized', 'forbidden'], true)) {
                 throw new AuthenticationException("Telnyx API authentication error ({$endpoint}): [{$code}] {$detail}");
