@@ -532,7 +532,10 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             'to' => $fromPhone,
         ]);
 
-        $this->logger->info('Telnyx SMS message parsed', ['threadId' => $threadId]);
+        $this->logger->info('Telnyx SMS message parsed', [
+            'threadId' => $threadId,
+            'body' => mb_substr($rawBody, 0, 500),
+        ]);
 
         return new Message(
             id: $messageId,
@@ -602,7 +605,10 @@ class TelnyxAdapter implements Adapter, HandlesMessageCosts, HandlesSlashCommand
             'to' => $fromPhone,
         ]);
 
-        $this->logger->info('Telnyx RCS message parsed', ['threadId' => $threadId]);
+        $this->logger->info('Telnyx RCS message parsed', [
+            'threadId' => $threadId,
+            'body' => mb_substr($rawBody, 0, 500),
+        ]);
 
         return new Message(
             id: $messageId,
